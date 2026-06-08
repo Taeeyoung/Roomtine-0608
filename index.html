@@ -1,0 +1,1311 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  Music, Sparkles, Play, Pause, Square, Trophy, User, 
+  Flame, Heart, Send, RefreshCw, Star, BarChart2, Compass, 
+  ChevronRight, Volume2, Plus, Trash2, Award, ShieldAlert,
+  Sliders, Smile, Disc, HelpCircle
+} from 'lucide-react';
+
+// ==========================================
+// CONFIGURATION & SETUP
+// ==========================================
+const apiKey = ""; // Runtime provides the key
+
+// Web Audio API Helpers
+let audioCtx = null;
+const initAudioContext = () => {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+};
+
+// Procedural Synth Sound Generator
+const playSynthNote = (freq, type, duration, startTime) => {
+  if (!audioCtx) return;
+  
+  const osc = audioCtx.createOscillator();
+  const gainNode = audioCtx.createGain();
+  
+  osc.type = type; // 'sine', 'square', 'sawtooth', 'triangle'
+  osc.frequency.setValueAtTime(freq, startTime);
+  
+  // Custom ADSR/Envelope for premium tone
+  gainNode.gain.setValueAtTime(0, startTime);
+  gainNode.gain.linearRampToValueAtTime(type === 'square' ? 0.08 : 0.15, startTime + 0.05);
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+  
+  osc.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
+  
+  osc.start(startTime);
+  osc.stop(startTime + duration);
+};
+
+// Procedural Drum Sound Generator
+const playDrumSound = (type, startTime) => {
+  if (!audioCtx) return;
+  
+  if (type === 'kick') {
+    // Deep Sine Pitch Sweep Kick
+    const osc = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+    osc.frequency.setValueAtTime(150, startTime);
+    osc.frequency.exponentialRampToValueAtTime(0.01, startTime + 0.15);
+    
+    gainNode.gain.setValueAtTime(0.5, startTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, startTime + 0.15);
+    
+    osc.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    osc.start(startTime);
+    osc.stop(startTime + 0.15);
+  } else if (type === 'snare') {
+    // White Noise Snap Snare
+    const bufferSize = audioCtx.sampleRate * 0.15;
+    const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = Math.random() * 2 - 1;
+    }
+    
+    const noise = audioCtx.createBufferSource();
+    noise.buffer = buffer;
+    
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'highpass';
+    filter.frequency.setValueAtTime(800, startTime);
+    
+    const gainNode = audioCtx.createGain();
+    gainNode.gain.setValueAtTime(0.2, startTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, startTime + 0.15);
+    
+    noise.connect(filter);
+    filter.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    
+    noise.start(startTime);
+    noise.stop(startTime + 0.15);
+  } else if (type === 'hat') {
+    // High pitched short burst
+    const osc = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(8000, startTime);
+    
+    gainNode.gain.setValueAtTime(0.12, startTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, startTime + 0.05);
+    
+    osc.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    osc.start(startTime);
+    osc.stop(startTime + 0.05);
+  }
+};
+
+// Pre-defined Scale Frequencies
+const SCALES = {
+  dreamy: [523.25, 493.88, 440.00, 392.00, 349.23, 329.63, 293.66, 261.63], // C Major Descending
+  cyberpunk: [466.16, 415.30, 369.99, 311.13, 277.18, 233.08, 207.65, 185.00], // Eb Minor Pentatonic
+  sunsetJazz: [587.33, 523.25, 493.88, 440.00, 392.00, 349.23, 293.66, 220.00], // D Doric
+};
+
+export default function App() {
+  // Current Tab / Page
+  const [activeTab, setActiveTab] = useState('studio'); // studio, arena, leaderboard, gallery
+  
+  // UI States
+  const [currentPrompt, setCurrentPrompt] = useState('');
+  const [isAiGenerating, setIsAiGenerating] = useState(false);
+  const [selectedTheme, setSelectedTheme] = useState('dreamy'); // dreamy, cyberpunk, sunsetJazz
+  const [bpm, setBpm] = useState(120);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentStep, setCurrentStep] = useState(-1);
+  const [toastMsg, setToastMsg] = useState(null);
+  
+  // Custom notification toast
+  const showToast = (message) => {
+    setToastMsg(message);
+    setTimeout(() => setToastMsg(null), 3000);
+  };
+
+  // 8-Step Sequencer Grid State (4 Tracks)
+  // Track 0: Melody (Synthesizer Lead)
+  // Track 1: Chords (Soft Pad/Chords)
+  // Track 2: Bass (Low Sawtooth)
+  // Track 3: Drums (Kick/Snare/Hat represented by values 1, 2, 3)
+  const [grid, setGrid] = useState({
+    melody: [1, 0, 3, 0, 5, 0, 2, 0], // Index of SCALES frequency (1-based, 0 = silence)
+    chords: [3, 0, 3, 0, 4, 0, 1, 0], 
+    bass: [7, 0, 5, 0, 7, 0, 6, 0],
+    drums: [1, 3, 2, 3, 1, 3, 2, 3], // 1: Kick, 2: Snare, 3: Hat, 0: Silent
+  });
+
+  // Track Playback interval reference
+  const playbackTimerRef = useRef(null);
+  const stepRef = useRef(-1);
+
+  // Stop Music Player
+  const stopPlayback = () => {
+    setIsPlaying(false);
+    setCurrentStep(-1);
+    stepRef.current = -1;
+    if (playbackTimerRef.current) {
+      clearInterval(playbackTimerRef.current);
+      playbackTimerRef.current = null;
+    }
+  };
+
+  // Start Music Player loop
+  const startPlayback = () => {
+    initAudioContext();
+    setIsPlaying(true);
+    
+    const stepDuration = 60 / bpm / 2; // Eighth notes
+    let nextStepTime = audioCtx.currentTime;
+    
+    playbackTimerRef.current = setInterval(() => {
+      const activeScale = SCALES[selectedTheme];
+      const nextStep = (stepRef.current + 1) % 8;
+      stepRef.current = nextStep;
+      setCurrentStep(nextStep);
+      
+      const playTime = audioCtx.currentTime + 0.05; // look-ahead safety buffer
+      
+      // Play Melody (Track 0)
+      const melNoteIdx = grid.melody[nextStep];
+      if (melNoteIdx > 0 && activeScale[melNoteIdx - 1]) {
+        playSynthNote(activeScale[melNoteIdx - 1], 'sine', stepDuration * 0.9, playTime);
+      }
+      
+      // Play Chords (Track 1)
+      const chordNoteIdx = grid.chords[nextStep];
+      if (chordNoteIdx > 0 && activeScale[chordNoteIdx - 1]) {
+        playSynthNote(activeScale[chordNoteIdx - 1] / 2, 'triangle', stepDuration * 1.5, playTime); // Played octave lower, softer envelope
+      }
+      
+      // Play Bass (Track 2)
+      const bassNoteIdx = grid.bass[nextStep];
+      if (bassNoteIdx > 0 && activeScale[bassNoteIdx - 1]) {
+        playSynthNote(activeScale[bassNoteIdx - 1] / 4, 'sawtooth', stepDuration * 0.9, playTime); // Sub-bass octave
+      }
+      
+      // Play Drums (Track 3)
+      const drumType = grid.drums[nextStep];
+      if (drumType === 1) playDrumSound('kick', playTime);
+      if (drumType === 2) playDrumSound('snare', playTime);
+      if (drumType === 3) playDrumSound('hat', playTime);
+      
+    }, (60000 / bpm) / 2);
+  };
+
+  const handlePlayPause = () => {
+    if (isPlaying) {
+      stopPlayback();
+    } else {
+      startPlayback();
+    }
+  };
+
+  useEffect(() => {
+    return () => stopPlayback();
+  }, [grid, bpm, selectedTheme]);
+
+  // Click handler to toggle grid cells
+  const toggleGridCell = (trackName, stepIndex) => {
+    initAudioContext();
+    const updated = [...grid[trackName]];
+    
+    if (trackName === 'drums') {
+      // Rotate drum types: 0 -> 1 (Kick) -> 2 (Snare) -> 3 (Hat) -> 0
+      updated[stepIndex] = (updated[stepIndex] + 1) % 4;
+      // Play sound snippet
+      const playTime = audioCtx.currentTime;
+      if (updated[stepIndex] === 1) playDrumSound('kick', playTime);
+      if (updated[stepIndex] === 2) playDrumSound('snare', playTime);
+      if (updated[stepIndex] === 3) playDrumSound('hat', playTime);
+    } else {
+      // Rotate note values from 0 to 8
+      updated[stepIndex] = (updated[stepIndex] + 1) % 9;
+      // Play synth preview
+      const activeScale = SCALES[selectedTheme];
+      if (updated[stepIndex] > 0) {
+        let pitchDivider = 1;
+        if (trackName === 'chords') pitchDivider = 2;
+        if (trackName === 'bass') pitchDivider = 4;
+        const synthType = trackName === 'melody' ? 'sine' : trackName === 'chords' ? 'triangle' : 'sawtooth';
+        playSynthNote(activeScale[updated[stepIndex] - 1] / pitchDivider, synthType, 0.2, audioCtx.currentTime);
+      }
+    }
+    
+    setGrid({ ...grid, [trackName]: updated });
+  };
+
+  // Preset themes loader
+  const loadPreset = (presetName) => {
+    setSelectedTheme(presetName);
+    if (presetName === 'dreamy') {
+      setGrid({
+        melody: [3, 5, 0, 6, 0, 3, 2, 0],
+        chords: [1, 0, 3, 0, 5, 0, 0, 0],
+        bass: [8, 0, 8, 0, 6, 0, 5, 0],
+        drums: [1, 3, 2, 3, 1, 3, 2, 3]
+      });
+      setBpm(105);
+    } else if (presetName === 'cyberpunk') {
+      setGrid({
+        melody: [6, 6, 5, 4, 3, 0, 4, 0],
+        chords: [0, 0, 2, 0, 0, 0, 1, 0],
+        bass: [4, 4, 4, 3, 4, 4, 3, 0],
+        drums: [1, 3, 1, 3, 2, 3, 1, 2]
+      });
+      setBpm(135);
+    } else if (presetName === 'sunsetJazz') {
+      setGrid({
+        melody: [2, 0, 4, 5, 7, 6, 0, 3],
+        chords: [3, 0, 3, 0, 5, 0, 2, 0],
+        bass: [5, 0, 5, 0, 3, 0, 2, 0],
+        drums: [1, 0, 3, 1, 2, 0, 3, 0]
+      });
+      setBpm(115);
+    }
+    showToast(`${presetName.toUpperCase()} 테마 프리셋 로드 완료!`);
+  };
+
+  // Generate Music using Gemini API (Designing Sequencer patterns based on Prompt)
+  const generateAIPattern = async () => {
+    if (!currentPrompt.trim()) {
+      showToast("원하는 무드나 감성 텍스트를 입력해주세요!");
+      return;
+    }
+    
+    setIsAiGenerating(true);
+    stopPlayback();
+    initAudioContext();
+    
+    const systemPrompt = `You are a high-fidelity AI Music Composer and expert Sound Designer. 
+Your task is to generate a perfect, highly-coherent 8-step techno/pop music pattern based on the user's Korean mood prompt.
+You must output a structured JSON schema conforming to:
+{
+  "theme": "dreamy" | "cyberpunk" | "sunsetJazz",
+  "bpm": number (between 80 and 150),
+  "melody": [number, number, number, number, number, number, number, number], 
+  "chords": [number, number, number, number, number, number, number, number],
+  "bass": [number, number, number, number, number, number, number, number],
+  "drums": [number, number, number, number, number, number, number, number]
+}
+
+Note details:
+- For 'melody', 'chords', 'bass': Choose integers from 0 to 8 (0 represents silent gap, 1-8 represents note pitch index in the scale). Create beautiful rhythm syncing with standard groove.
+- For 'drums': Choose integers from 0 to 3 (0: rest, 1: Kick, 2: Snare, 3: Hi-hat). Ensure Kick is mostly on step 0 and 4. Hi-hats should fill the empty spaces.
+- Select 'theme' matching the mood: 'dreamy' for soft/space/sad, 'cyberpunk' for fast/synthwave/epic, 'sunsetJazz' for groovy/ambient/lofi.`;
+
+    let retries = 5;
+    let delay = 1000;
+    
+    while (retries > 0) {
+      try {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: `Generate a music pattern for mood prompt: "${currentPrompt}"` }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            generationConfig: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: "OBJECT",
+                properties: {
+                  theme: { type: "STRING", enum: ["dreamy", "cyberpunk", "sunsetJazz"] },
+                  bpm: { type: "INTEGER" },
+                  melody: { type: "ARRAY", items: { type: "INTEGER" } },
+                  chords: { type: "ARRAY", items: { type: "INTEGER" } },
+                  bass: { type: "ARRAY", items: { type: "INTEGER" } },
+                  drums: { type: "ARRAY", items: { type: "INTEGER" } }
+                },
+                required: ["theme", "bpm", "melody", "chords", "bass", "drums"]
+              }
+            }
+          })
+        });
+
+        if (!response.ok) throw new Error("Network response not okay");
+        
+        const result = await response.json();
+        const outputText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        
+        if (outputText) {
+          const parsed = JSON.parse(outputText);
+          
+          // Apply AI Generated pattern to state
+          setGrid({
+            melody: parsed.melody.map(v => Math.max(0, Math.min(8, v))),
+            chords: parsed.chords.map(v => Math.max(0, Math.min(8, v))),
+            bass: parsed.bass.map(v => Math.max(0, Math.min(8, v))),
+            drums: parsed.drums.map(v => Math.max(0, Math.min(3, v)))
+          });
+          setBpm(parsed.bpm || 120);
+          setSelectedTheme(parsed.theme || 'dreamy');
+          
+          showToast(`🎵 AI 작곡 성공: [${parsed.theme.toUpperCase()}] 분위기 반영 완료!`);
+          break;
+        }
+      } catch (err) {
+        retries--;
+        if (retries === 0) {
+          showToast("AI 모델 연동 실패. 로컬 프리셋으로 연주해보세요!");
+        } else {
+          await new Promise(resolve => setTimeout(resolve, delay));
+          delay *= 2;
+        }
+      }
+    }
+    setIsAiGenerating(false);
+  };
+
+  // Mock Database State for interactive experience
+  const [arenaSubmissions, setArenaSubmissions] = useState([
+    {
+      id: "track-1",
+      creator: "박지훈 @TheCreative",
+      prompt: "스포티파이 감성 한 스푼 넣은 비 오는 가을밤 카페 분위기",
+      theme: "sunsetJazz",
+      votes: 184,
+      reacts: { fire: 42, heart: 98, cry: 24, party: 20 },
+      grid: {
+        melody: [2, 0, 4, 5, 7, 0, 3, 2],
+        chords: [3, 0, 3, 0, 5, 0, 2, 0],
+        bass: [5, 0, 5, 0, 3, 0, 2, 0],
+        drums: [1, 0, 3, 1, 2, 0, 3, 0]
+      },
+      bpm: 110
+    },
+    {
+      id: "track-2",
+      creator: "최수아 @TheCompetitor",
+      prompt: "가상현실 세계관에서 보스몹과 대치하는 장엄한 사이버펑크 첼린지",
+      theme: "cyberpunk",
+      votes: 215,
+      reacts: { fire: 98, heart: 45, cry: 12, party: 60 },
+      grid: {
+        melody: [6, 6, 5, 4, 3, 0, 4, 0],
+        chords: [0, 0, 2, 0, 0, 0, 1, 0],
+        bass: [4, 4, 4, 3, 4, 4, 3, 0],
+        drums: [1, 3, 1, 3, 2, 3, 1, 2]
+      },
+      bpm: 140
+    }
+  ]);
+
+  const [myArchivedTracks, setMyArchivedTracks] = useState([
+    {
+      id: "my-1",
+      title: "달빛 아래의 우주 유영",
+      prompt: "몽환적이고 신비로운 은하수 탐험",
+      theme: "dreamy",
+      bpm: 100,
+      likes: 12,
+      rank: "플래티넘 IV",
+      grid: {
+        melody: [3, 5, 0, 6, 0, 3, 2, 0],
+        chords: [1, 0, 3, 0, 5, 0, 0, 0],
+        bass: [8, 0, 8, 0, 6, 0, 5, 0],
+        drums: [1, 3, 2, 3, 1, 3, 2, 3]
+      }
+    }
+  ]);
+
+  // Submit Current Composed Track to Arena
+  const submitToArena = () => {
+    stopPlayback();
+    const newTrack = {
+      id: `track-${Date.now()}`,
+      creator: "나 @MySpace",
+      prompt: currentPrompt || "나의 즉흥 감성 트랙",
+      theme: selectedTheme,
+      votes: 1,
+      reacts: { fire: 0, heart: 1, cry: 0, party: 0 },
+      grid: { ...grid },
+      bpm: bpm
+    };
+    
+    setArenaSubmissions([newTrack, ...arenaSubmissions]);
+    
+    // Also save to personal archive
+    const newArchive = {
+      id: `my-${Date.now()}`,
+      title: currentPrompt ? `${currentPrompt.slice(0, 12)}...` : "오늘의 명작",
+      prompt: currentPrompt || "직접 조작한 커스텀 명작",
+      theme: selectedTheme,
+      bpm: bpm,
+      likes: 0,
+      rank: "골드 I",
+      grid: { ...grid }
+    };
+    setMyArchivedTracks([newArchive, ...myArchivedTracks]);
+    
+    showToast("🎉 대결 아레나에 트랙을 성공적으로 제출했습니다! 갤러리에도 박제 완료.");
+    setActiveTab('arena');
+  };
+
+  // Arena states
+  const [votedTracks, setVotedTracks] = useState({}); //TrackId : boolean
+  const [activeBattlePair, setActiveBattlePair] = useState([0, 1]); // indexes in submissions
+  const [playingArenaTrack, setPlayingArenaTrack] = useState(null); // Track ID currently playing in arena
+
+  // Play Track in Arena using procedural synthesizer
+  const playTrackData = (track) => {
+    stopPlayback();
+    initAudioContext();
+    setPlayingArenaTrack(track.id);
+    
+    let step = 0;
+    const stepDuration = 60 / track.bpm / 2;
+    
+    playbackTimerRef.current = setInterval(() => {
+      const activeScale = SCALES[track.theme];
+      const playTime = audioCtx.currentTime + 0.05;
+      
+      // Melody
+      const melNoteIdx = track.grid.melody[step];
+      if (melNoteIdx > 0 && activeScale[melNoteIdx - 1]) {
+        playSynthNote(activeScale[melNoteIdx - 1], 'sine', stepDuration * 0.9, playTime);
+      }
+      // Chords
+      const chordNoteIdx = track.grid.chords[step];
+      if (chordNoteIdx > 0 && activeScale[chordNoteIdx - 1]) {
+        playSynthNote(activeScale[chordNoteIdx - 1] / 2, 'triangle', stepDuration * 1.5, playTime);
+      }
+      // Bass
+      const bassNoteIdx = track.grid.bass[step];
+      if (bassNoteIdx > 0 && activeScale[bassNoteIdx - 1]) {
+        playSynthNote(activeScale[bassNoteIdx - 1] / 4, 'sawtooth', stepDuration * 0.9, playTime);
+      }
+      // Drums
+      const drumType = track.grid.drums[step];
+      if (drumType === 1) playDrumSound('kick', playTime);
+      if (drumType === 2) playDrumSound('snare', playTime);
+      if (drumType === 3) playDrumSound('hat', playTime);
+      
+      step = (step + 1) % 8;
+    }, (60000 / track.bpm) / 2);
+  };
+
+  const handleArenaPlayToggle = (track) => {
+    if (playingArenaTrack === track.id) {
+      stopPlayback();
+      setPlayingArenaTrack(null);
+    } else {
+      playTrackData(track);
+    }
+  };
+
+  const castVote = (trackId, reactKey) => {
+    if (votedTracks[trackId]) {
+      showToast("이미 이 트랙에 투표하셨습니다!");
+      return;
+    }
+    
+    setArenaSubmissions(arenaSubmissions.map(item => {
+      if (item.id === trackId) {
+        return {
+          ...item,
+          votes: item.votes + 1,
+          reacts: {
+            ...item.reacts,
+            [reactKey]: item.reacts[reactKey] + 1
+          }
+        };
+      }
+      return item;
+    }));
+    
+    setVotedTracks({ ...votedTracks, [trackId]: true });
+    showToast("🔥 투표와 감성 피드백이 실시간 반영되었습니다!");
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-purple-600 selection:text-white">
+      {/* Dynamic Toast System */}
+      {toastMsg && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 bg-gradient-to-r from-purple-600 to-pink-600 text-white font-semibold py-3 px-6 rounded-full shadow-lg border border-purple-400 flex items-center gap-3 animate-bounce">
+          <Sparkles className="w-5 h-5 animate-spin" />
+          <span>{toastMsg}</span>
+        </div>
+      )}
+
+      {/* HEADER SECTION */}
+      <header className="sticky top-0 z-40 bg-slate-900/90 backdrop-blur-md border-b border-slate-800 px-6 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-purple-600 via-fuchsia-500 to-pink-500 flex items-center justify-center shadow-lg shadow-purple-500/20">
+            <Music className="w-5 h-5 text-white animate-pulse" />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold tracking-wider bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent flex items-center gap-2">
+              MuBeat AI <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-400 border border-purple-500/30">SEASON 1</span>
+            </h1>
+            <p className="text-xs text-slate-400">AI 크리에이티브 음악 대결 스튜디오</p>
+          </div>
+        </div>
+
+        {/* Global Stats bar */}
+        <div className="hidden md:flex items-center gap-6 text-sm">
+          <div className="flex items-center gap-2 bg-slate-800/60 rounded-lg px-3 py-1.5 border border-slate-700/50">
+            <Trophy className="w-4 h-4 text-amber-400" />
+            <span className="text-slate-300 font-medium">현재 아레나 랭크: </span>
+            <span className="text-purple-400 font-bold">골드 II (1,450 LP)</span>
+          </div>
+          <div className="flex items-center gap-2 bg-slate-800/60 rounded-lg px-3 py-1.5 border border-slate-700/50">
+            <Flame className="w-4 h-4 text-orange-500 animate-pulse" />
+            <span className="text-slate-300 font-medium">오늘의 에너지:</span>
+            <span className="text-orange-400 font-bold">85 / 100</span>
+          </div>
+        </div>
+
+        {/* Profile Card */}
+        <div className="flex items-center gap-3">
+          <div className="text-right">
+            <p className="text-sm font-semibold text-slate-200">지훈_Creative</p>
+            <p className="text-xs text-purple-400">마스터 메이커</p>
+          </div>
+          <div className="w-10 h-10 rounded-full border border-purple-500/40 p-0.5 bg-slate-800">
+            <div className="w-full h-full rounded-full bg-gradient-to-tr from-purple-700 to-indigo-800 flex items-center justify-center text-sm font-bold">
+              JH
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* MAIN CONTAINER */}
+      <div className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+        
+        {/* SIDEBAR NAVIGATION */}
+        <nav className="lg:col-span-3 flex flex-row lg:flex-col gap-2 bg-slate-900/60 p-2 lg:p-4 rounded-2xl border border-slate-800/80 justify-around lg:justify-start overflow-x-auto">
+          <div className="hidden lg:block px-3 py-2 text-xs font-semibold uppercase text-slate-500 tracking-wider">
+            메뉴 및 활동
+          </div>
+          <button 
+            onClick={() => { stopPlayback(); setActiveTab('studio'); }}
+            className={`flex items-center gap-3 w-full px-4 py-3.5 rounded-xl text-sm font-semibold transition-all duration-200 ${activeTab === 'studio' ? 'bg-gradient-to-r from-purple-600/30 to-pink-600/10 text-purple-300 border-l-4 border-purple-500 shadow-md' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'}`}
+          >
+            <Sparkles className="w-5 h-5 text-purple-400" />
+            <span>AI 작곡 스튜디오</span>
+          </button>
+          
+          <button 
+            onClick={() => { stopPlayback(); setActiveTab('arena'); }}
+            className={`flex items-center gap-3 w-full px-4 py-3.5 rounded-xl text-sm font-semibold transition-all duration-200 ${activeTab === 'arena' ? 'bg-gradient-to-r from-purple-600/30 to-pink-600/10 text-purple-300 border-l-4 border-purple-500 shadow-md' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'}`}
+          >
+            <Compass className="w-5 h-5 text-pink-400" />
+            <span className="flex items-center gap-1.5">
+              블라인드 아레나
+              <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping"></span>
+            </span>
+          </button>
+
+          <button 
+            onClick={() => { stopPlayback(); setActiveTab('leaderboard'); }}
+            className={`flex items-center gap-3 w-full px-4 py-3.5 rounded-xl text-sm font-semibold transition-all duration-200 ${activeTab === 'leaderboard' ? 'bg-gradient-to-r from-purple-600/30 to-pink-600/10 text-purple-300 border-l-4 border-purple-500 shadow-md' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'}`}
+          >
+            <Trophy className="w-5 h-5 text-amber-400" />
+            <span>시즌 리더보드</span>
+          </button>
+
+          <button 
+            onClick={() => { stopPlayback(); setActiveTab('gallery'); }}
+            className={`flex items-center gap-3 w-full px-4 py-3.5 rounded-xl text-sm font-semibold transition-all duration-200 ${activeTab === 'gallery' ? 'bg-gradient-to-r from-purple-600/30 to-pink-600/10 text-purple-300 border-l-4 border-purple-500 shadow-md' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'}`}
+          >
+            <User className="w-5 h-5 text-teal-400" />
+            <span>마이 음반 갤러리</span>
+          </button>
+
+          <div className="hidden lg:block mt-auto p-4 rounded-xl bg-gradient-to-br from-indigo-950/40 to-purple-950/40 border border-indigo-900/30">
+            <h3 className="text-xs font-bold text-indigo-400 mb-1 flex items-center gap-1">
+              <Award className="w-3.5 h-3.5" /> 대결 규칙 가이드
+            </h3>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              매일 자정 공개되는 오늘의 키워드로 작곡해 도전하세요! 유저들의 순수 블라인드 투표로 우승자가 가려집니다.
+            </p>
+          </div>
+        </nav>
+
+        {/* WORKSPACE AREA */}
+        <main className="lg:col-span-9 flex flex-col gap-6">
+          
+          {/* TAB 1: STUDIO (AI COMPOSER) */}
+          {activeTab === 'studio' && (
+            <div className="flex flex-col gap-6">
+              
+              {/* Keyword & AI Input Section */}
+              <div className="bg-gradient-to-r from-slate-900 to-purple-950/40 p-6 rounded-2xl border border-slate-800 flex flex-col gap-4 relative overflow-hidden">
+                <div className="absolute right-0 top-0 w-64 h-64 bg-purple-600/10 rounded-full blur-3xl pointer-events-none"></div>
+                
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div className="flex items-center gap-2">
+                    <span className="p-2 rounded-lg bg-purple-500/20 text-purple-400">
+                      <Sparkles className="w-5 h-5" />
+                    </span>
+                    <div>
+                      <h2 className="text-lg font-bold">감성 테마 및 키워드로 만들기</h2>
+                      <p className="text-xs text-slate-400">텍스트 감성에 맞춰 AI가 실시간 곡 구조를 조립해 드립니다.</p>
+                    </div>
+                  </div>
+                  
+                  {/* Preset quick links */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-500">기본 무드 프리셋:</span>
+                    <button 
+                      onClick={() => loadPreset('dreamy')}
+                      className={`text-xs px-2.5 py-1.5 rounded-lg border transition-all ${selectedTheme === 'dreamy' ? 'bg-purple-600/30 text-purple-300 border-purple-500' : 'bg-slate-800 text-slate-400 border-slate-700'}`}
+                    >
+                      #몽환적인_밤
+                    </button>
+                    <button 
+                      onClick={() => loadPreset('cyberpunk')}
+                      className={`text-xs px-2.5 py-1.5 rounded-lg border transition-all ${selectedTheme === 'cyberpunk' ? 'bg-purple-600/30 text-purple-300 border-purple-500' : 'bg-slate-800 text-slate-400 border-slate-700'}`}
+                    >
+                      #사이언스_펑크
+                    </button>
+                    <button 
+                      onClick={() => loadPreset('sunsetJazz')}
+                      className={`text-xs px-2.5 py-1.5 rounded-lg border transition-all ${selectedTheme === 'sunsetJazz' ? 'bg-purple-600/30 text-purple-300 border-purple-500' : 'bg-slate-800 text-slate-400 border-slate-700'}`}
+                    >
+                      #노을빛_재즈
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2 mt-2">
+                  <input 
+                    type="text" 
+                    value={currentPrompt}
+                    onChange={(e) => setCurrentPrompt(e.target.value)}
+                    placeholder="예시: 비 내리는 오후 따뜻한 에스프레소 같은 멜로디" 
+                    className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 text-slate-200 transition-all placeholder:text-slate-600"
+                  />
+                  <button 
+                    onClick={generateAIPattern}
+                    disabled={isAiGenerating}
+                    className="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-semibold px-6 py-3 rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-purple-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isAiGenerating ? (
+                      <>
+                        <RefreshCw className="w-5 h-5 animate-spin" />
+                        <span>AI 작곡하는 중...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-5 h-5 animate-pulse" />
+                        <span>AI 감성 작곡 생성</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Composition Studio Layout */}
+              <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-xl">
+                
+                {/* Control Bar */}
+                <div className="bg-slate-950 p-4 border-b border-slate-800/80 flex flex-wrap items-center justify-between gap-4">
+                  <div className="flex items-center gap-4">
+                    <button 
+                      onClick={handlePlayPause}
+                      className={`w-11 h-11 rounded-full flex items-center justify-center shadow-md transition-all ${isPlaying ? 'bg-pink-600 text-white animate-pulse' : 'bg-purple-600 text-white hover:bg-purple-500'}`}
+                    >
+                      {isPlaying ? <Pause className="w-5 h-5 fill-white" /> : <Play className="w-5 h-5 fill-white ml-0.5" />}
+                    </button>
+                    <button 
+                      onClick={stopPlayback}
+                      className="w-9 h-9 rounded-full bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700 flex items-center justify-center transition-all"
+                    >
+                      <Square className="w-4 h-4 fill-current" />
+                    </button>
+                    
+                    <div className="h-6 w-[1px] bg-slate-800"></div>
+
+                    {/* BPM Adjuster */}
+                    <div className="flex items-center gap-2 text-sm text-slate-400">
+                      <span>템포 (BPM):</span>
+                      <input 
+                        type="range" 
+                        min="80" 
+                        max="160" 
+                        value={bpm} 
+                        onChange={(e) => setBpm(parseInt(e.target.value))}
+                        className="w-24 accent-purple-500 cursor-pointer"
+                      />
+                      <span className="font-semibold text-purple-400">{bpm}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <button 
+                      onClick={() => {
+                        setGrid({
+                          melody: [0,0,0,0,0,0,0,0],
+                          chords: [0,0,0,0,0,0,0,0],
+                          bass: [0,0,0,0,0,0,0,0],
+                          drums: [0,0,0,0,0,0,0,0]
+                        });
+                        showToast("작곡 에디터가 리셋되었습니다.");
+                      }}
+                      className="text-xs text-slate-500 hover:text-slate-300 bg-slate-800 px-3 py-2 rounded-lg border border-slate-700 transition-all flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> 리셋
+                    </button>
+                    <button 
+                      onClick={submitToArena}
+                      className="text-sm font-bold text-white bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500 px-5 py-2.5 rounded-xl flex items-center gap-2 shadow-lg transition-all"
+                    >
+                      <Send className="w-4 h-4" /> 아레나에 출전하기
+                    </button>
+                  </div>
+                </div>
+
+                {/* Grid Sequencer Area */}
+                <div className="p-6 flex flex-col gap-6">
+                  
+                  {/* Step Indicators */}
+                  <div className="grid grid-cols-12 items-center text-center">
+                    <div className="col-span-3 text-left pl-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                      악기 트랙
+                    </div>
+                    <div className="col-span-9 grid grid-cols-8 gap-1.5">
+                      {[1, 2, 3, 4, 5, 6, 7, 8].map((step, idx) => (
+                        <div 
+                          key={step} 
+                          className={`text-xs font-bold py-1 rounded transition-all ${currentStep === idx ? 'text-purple-400 bg-purple-500/10 border border-purple-500/20' : 'text-slate-600'}`}
+                        >
+                          {step}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Sequencer Track Blocks */}
+                  <div className="flex flex-col gap-3">
+                    
+                    {/* Track 1: Melody */}
+                    <div className="grid grid-cols-12 items-center">
+                      <div className="col-span-3 flex flex-col pr-4">
+                        <span className="text-sm font-semibold text-purple-300 flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full bg-purple-400"></span>
+                          리드 멜로디 (Lead)
+                        </span>
+                        <span className="text-[10px] text-slate-500">감미롭고 청량한 멜로디 라인</span>
+                      </div>
+                      <div className="col-span-9 grid grid-cols-8 gap-1.5">
+                        {grid.melody.map((cellValue, stepIdx) => (
+                          <button
+                            key={stepIdx}
+                            onClick={() => toggleGridCell('melody', stepIdx)}
+                            className={`h-16 rounded-xl border flex flex-col items-center justify-center transition-all ${
+                              currentStep === stepIdx ? 'ring-2 ring-purple-400/80 shadow-md' : ''
+                            } ${
+                              cellValue > 0 
+                                ? 'bg-gradient-to-b from-purple-600 to-purple-800 text-white border-purple-500 shadow-lg shadow-purple-900/30 font-bold text-sm' 
+                                : 'bg-slate-950 border-slate-800/80 text-slate-700 hover:border-slate-700 hover:bg-slate-850'
+                            }`}
+                          >
+                            {cellValue > 0 ? (
+                              <>
+                                <span className="text-[10px] opacity-75">NOTE</span>
+                                <span className="text-sm font-extrabold">{cellValue}</span>
+                              </>
+                            ) : (
+                              <Plus className="w-4 h-4 opacity-10 hover:opacity-50" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Track 2: Chords */}
+                    <div className="grid grid-cols-12 items-center">
+                      <div className="col-span-3 flex flex-col pr-4">
+                        <span className="text-sm font-semibold text-indigo-300 flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full bg-indigo-400"></span>
+                          신스 코드 (Chords)
+                        </span>
+                        <span className="text-[10px] text-slate-500">배경을 채워주는 부드러운 화음</span>
+                      </div>
+                      <div className="col-span-9 grid grid-cols-8 gap-1.5">
+                        {grid.chords.map((cellValue, stepIdx) => (
+                          <button
+                            key={stepIdx}
+                            onClick={() => toggleGridCell('chords', stepIdx)}
+                            className={`h-16 rounded-xl border flex flex-col items-center justify-center transition-all ${
+                              currentStep === stepIdx ? 'ring-2 ring-indigo-400/80 shadow-md' : ''
+                            } ${
+                              cellValue > 0 
+                                ? 'bg-gradient-to-b from-indigo-600 to-indigo-800 text-white border-indigo-500 shadow-lg shadow-indigo-900/30 font-bold text-sm' 
+                                : 'bg-slate-950 border-slate-800/80 text-slate-700 hover:border-slate-700 hover:bg-slate-850'
+                            }`}
+                          >
+                            {cellValue > 0 ? (
+                              <>
+                                <span className="text-[10px] opacity-75">CHORD</span>
+                                <span className="text-sm font-extrabold">{cellValue}</span>
+                              </>
+                            ) : (
+                              <Plus className="w-4 h-4 opacity-10 hover:opacity-50" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Track 3: Bass */}
+                    <div className="grid grid-cols-12 items-center">
+                      <div className="col-span-3 flex flex-col pr-4">
+                        <span className="text-sm font-semibold text-blue-300 flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full bg-blue-400"></span>
+                          베이스 라인 (Bass)
+                        </span>
+                        <span className="text-[10px] text-slate-500">묵직한 리듬을 지탱해주는 톱니파</span>
+                      </div>
+                      <div className="col-span-9 grid grid-cols-8 gap-1.5">
+                        {grid.bass.map((cellValue, stepIdx) => (
+                          <button
+                            key={stepIdx}
+                            onClick={() => toggleGridCell('bass', stepIdx)}
+                            className={`h-16 rounded-xl border flex flex-col items-center justify-center transition-all ${
+                              currentStep === stepIdx ? 'ring-2 ring-blue-400/80 shadow-md' : ''
+                            } ${
+                              cellValue > 0 
+                                ? 'bg-gradient-to-b from-blue-600 to-blue-800 text-white border-blue-500 shadow-lg shadow-blue-900/30 font-bold text-sm' 
+                                : 'bg-slate-950 border-slate-800/80 text-slate-700 hover:border-slate-700 hover:bg-slate-850'
+                            }`}
+                          >
+                            {cellValue > 0 ? (
+                              <>
+                                <span className="text-[10px] opacity-75">BASS</span>
+                                <span className="text-sm font-extrabold">{cellValue}</span>
+                              </>
+                            ) : (
+                              <Plus className="w-4 h-4 opacity-10 hover:opacity-50" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Track 4: Drums */}
+                    <div className="grid grid-cols-12 items-center">
+                      <div className="col-span-3 flex flex-col pr-4">
+                        <span className="text-sm font-semibold text-pink-300 flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full bg-pink-400"></span>
+                          드럼 비트 (Drums)
+                        </span>
+                        <span className="text-[10px] text-slate-500">클릭해 킥·스네어·하프 전환</span>
+                      </div>
+                      <div className="col-span-9 grid grid-cols-8 gap-1.5">
+                        {grid.drums.map((cellValue, stepIdx) => (
+                          <button
+                            key={stepIdx}
+                            onClick={() => toggleGridCell('drums', stepIdx)}
+                            className={`h-16 rounded-xl border flex flex-col items-center justify-center transition-all ${
+                              currentStep === stepIdx ? 'ring-2 ring-pink-400/80 shadow-md' : ''
+                            } ${
+                              cellValue === 1 ? 'bg-rose-600 border-rose-500 text-white shadow-rose-900/40 font-bold' :
+                              cellValue === 2 ? 'bg-teal-600 border-teal-500 text-white shadow-teal-900/40 font-bold' :
+                              cellValue === 3 ? 'bg-amber-600 border-amber-500 text-white shadow-amber-900/40 font-bold' :
+                              'bg-slate-950 border-slate-800/80 text-slate-700 hover:border-slate-700 hover:bg-slate-850'
+                            }`}
+                          >
+                            {cellValue === 1 && <span className="text-xs">🥁 KICK</span>}
+                            {cellValue === 2 && <span className="text-xs">🔥 SNAR</span>}
+                            {cellValue === 3 && <span className="text-xs">✨ HI-HAT</span>}
+                            {cellValue === 0 && <Plus className="w-4 h-4 opacity-10 hover:opacity-50" />}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                  </div>
+
+                  {/* Playback dynamic visualizer */}
+                  <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-2">
+                      <Volume2 className="w-4 h-4 text-purple-400" />
+                      <span className="text-xs text-slate-500">실시간 파형 오디오 모니터:</span>
+                    </div>
+                    
+                    {/* CSS Animated Audio Waves synced with isPlaying */}
+                    <div className="flex-1 max-w-xs flex items-center justify-end gap-1 h-6">
+                      {[...Array(16)].map((_, i) => (
+                        <span 
+                          key={i} 
+                          style={{
+                            animationDelay: `${i * 0.1}s`,
+                            animationDuration: isPlaying ? `${0.5 + Math.random() * 0.5}s` : '0s'
+                          }}
+                          className={`w-1 rounded-full bg-gradient-to-t from-purple-500 to-pink-500 transition-all ${isPlaying ? 'h-full animate-bounce' : 'h-1.5'}`}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                </div>
+
+              </div>
+              
+              {/* Pro Tip Box */}
+              <div className="p-4 rounded-xl bg-purple-950/20 border border-purple-900/40 text-xs text-purple-300 flex items-start gap-3">
+                <HelpCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                <div>
+                  <span className="font-bold">프로 시니어 팁: </span>
+                  직접 패널 블록을 한 단계씩 클릭해 멜로디 높낮이(1~8)를 조율하거나 드럼 패턴을 커스터마이징해 나만의 감성이 담긴 음악적 시그니처 조각을 완성해보세요. AI가 완성도 높은 프리셋 템플릿을 제공하므로 박자가 어긋나지 않고 완벽하게 동기화됩니다.
+                </div>
+              </div>
+
+            </div>
+          )}
+
+          {/* TAB 2: BLIND ARENA (VOTING & FEED) */}
+          {activeTab === 'arena' && (
+            <div className="flex flex-col gap-6">
+              
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-xl font-bold flex items-center gap-2">
+                    <Compass className="w-6 h-6 text-pink-500" />
+                    오늘의 블라인드 대결 아레나 피드
+                  </h2>
+                  <div className="text-xs text-slate-400">공정한 투표를 위해 참가자는 블라인드로 제공됩니다.</div>
+                </div>
+                <p className="text-sm text-slate-400">
+                  동일한 테마 또는 키워드 하에 창작된 두 작곡을 듣고 더 트렌디하고 감성을 잘 살린 곡에 투표해주세요!
+                </p>
+              </div>
+
+              {/* Weekly/Today's Duel Bracket Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {arenaSubmissions.slice(0, 2).map((track, index) => {
+                  const hasVotedThis = votedTracks[track.id];
+                  const totalVotes = arenaSubmissions[0].votes + arenaSubmissions[1].votes;
+                  const percentage = totalVotes > 0 ? Math.round((track.votes / totalVotes) * 100) : 50;
+
+                  return (
+                    <div 
+                      key={track.id} 
+                      className={`rounded-2xl border p-6 flex flex-col justify-between transition-all relative overflow-hidden bg-slate-900 ${
+                        playingArenaTrack === track.id ? 'border-pink-500 shadow-lg shadow-pink-900/20' : 'border-slate-800'
+                      }`}
+                    >
+                      <div className="absolute top-0 right-0 w-32 h-32 bg-pink-500/5 rounded-full blur-2xl pointer-events-none"></div>
+                      
+                      {/* Top Meta info */}
+                      <div>
+                        <div className="flex items-center justify-between mb-4">
+                          <span className="text-xs font-bold text-slate-400 uppercase tracking-widest px-2.5 py-1 rounded bg-slate-800">
+                            곡 후보 {index === 0 ? 'A' : 'B'}
+                          </span>
+                          
+                          {/* Animated playing indicator */}
+                          {playingArenaTrack === track.id && (
+                            <span className="flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-pink-500 animate-ping"></span>
+                              <span className="text-xs font-bold text-pink-400">PLAYING</span>
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Interactive Play Disc UI */}
+                        <div className="flex items-center gap-4 mb-6">
+                          <button 
+                            onClick={() => handleArenaPlayToggle(track)}
+                            className={`w-14 h-14 rounded-full flex items-center justify-center shadow-lg transition-all ${
+                              playingArenaTrack === track.id ? 'bg-pink-600 hover:bg-pink-500 animate-spin text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-200'
+                            }`}
+                            style={{ animationDuration: '6s' }}
+                          >
+                            {playingArenaTrack === track.id ? (
+                              <Pause className="w-6 h-6" />
+                            ) : (
+                              <Play className="w-6 h-6 fill-current ml-1" />
+                            )}
+                          </button>
+                          
+                          <div>
+                            <div className="text-xs text-purple-400 font-semibold uppercase mb-0.5"># {track.theme}</div>
+                            <h3 className="text-sm font-bold text-slate-200 line-clamp-2 leading-snug">
+                              &ldquo;{track.prompt}&rdquo;
+                            </h3>
+                            <div className="flex items-center gap-3 mt-1.5">
+                              <span className="text-xs text-slate-500">BPM: {track.bpm}</span>
+                              <span className="text-xs text-slate-500">•</span>
+                              <span className="text-xs text-slate-500">8단계 루프 음질</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Vote & Reactions Section */}
+                      <div className="border-t border-slate-800/80 pt-4 mt-4">
+                        
+                        {/* Interactive reaction buttons */}
+                        <div className="flex items-center gap-2 mb-4 justify-between">
+                          <button 
+                            onClick={() => castVote(track.id, 'fire')}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-xs text-slate-400 hover:text-orange-500 transition-all border border-slate-850"
+                          >
+                            <Flame className="w-3.5 h-3.5" />
+                            <span>열정 {track.reacts.fire}</span>
+                          </button>
+                          <button 
+                            onClick={() => castVote(track.id, 'heart')}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-xs text-slate-400 hover:text-pink-500 transition-all border border-slate-850"
+                          >
+                            <Heart className="w-3.5 h-3.5" />
+                            <span>하트 {track.reacts.heart}</span>
+                          </button>
+                          <button 
+                            onClick={() => castVote(track.id, 'party')}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-xs text-slate-400 hover:text-amber-500 transition-all border border-slate-850"
+                          >
+                            <Smile className="w-3.5 h-3.5" />
+                            <span>신남 {track.reacts.party}</span>
+                          </button>
+                        </div>
+
+                        {/* Action Voting Button or Dynamic Results */}
+                        {hasVotedThis ? (
+                          <div className="bg-slate-950/80 p-3.5 rounded-xl border border-pink-500/20">
+                            <div className="flex items-center justify-between text-xs font-bold mb-1.5 text-slate-300">
+                              <span>나의 투표 완료</span>
+                              <span className="text-pink-400">{percentage}% 득표 중</span>
+                            </div>
+                            <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+                              <div 
+                                style={{ width: `${percentage}%` }} 
+                                className="bg-gradient-to-r from-pink-500 to-purple-500 h-full rounded-full transition-all duration-500"
+                              ></div>
+                            </div>
+                            <p className="text-[10px] text-slate-500 mt-1.5 text-right">
+                              누적 투표수: {track.votes}표
+                            </p>
+                          </div>
+                        ) : (
+                          <button 
+                            onClick={() => castVote(track.id, 'heart')}
+                            className="w-full py-3 rounded-xl bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-bold text-sm transition-all shadow-md flex items-center justify-center gap-1.5"
+                          >
+                            <Heart className="w-4 h-4 fill-current" />
+                            이 곡에 소중한 한 표 던지기
+                          </button>
+                        )}
+
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Community Feedback Live Stream */}
+              <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800">
+                <h3 className="text-sm font-bold text-slate-300 mb-4 flex items-center gap-2">
+                  <BarChart2 className="w-4 h-4 text-purple-400" />
+                  실시간 아레나 피드백 스트림
+                </h3>
+                
+                <div className="flex flex-col gap-3">
+                  <div className="p-3 bg-slate-950 rounded-lg flex items-center justify-between text-xs">
+                    <span className="text-slate-400 font-semibold">User @LofiLover</span>
+                    <span className="text-purple-400">곡 후보 A에 #노을빛_재즈 태그 피드백을 보냈습니다.</span>
+                    <span className="text-slate-600">방금 전</span>
+                  </div>
+                  <div className="p-3 bg-slate-950 rounded-lg flex items-center justify-between text-xs">
+                    <span className="text-slate-400 font-semibold">User @NeonCyber</span>
+                    <span className="text-pink-400">곡 후보 B에 투표를 완료했습니다!</span>
+                    <span className="text-slate-600">2분 전</span>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          )}
+
+          {/* TAB 3: LEADERBOARD */}
+          {activeTab === 'leaderboard' && (
+            <div className="flex flex-col gap-6">
+              
+              <div className="flex flex-col gap-2">
+                <h2 className="text-xl font-bold flex items-center gap-2">
+                  <Trophy className="w-6 h-6 text-amber-400 animate-bounce" />
+                  시즌 1 음악 아레나 리더보드
+                </h2>
+                <p className="text-sm text-slate-400">
+                  매주 블라인드 배틀 득표수를 기준으로 산정되는 크리에이터 랭킹입니다. 매월 시즌 보상이 지급됩니다.
+                </p>
+              </div>
+
+              {/* Top 3 Podium visual card */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end mt-4">
+                
+                {/* 2nd Place */}
+                <div className="bg-gradient-to-b from-slate-900 to-slate-950 p-6 rounded-2xl border border-slate-800/80 text-center flex flex-col items-center justify-center relative md:order-1 h-64">
+                  <div className="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center text-slate-300 border-2 border-slate-400 font-extrabold text-lg mb-3 shadow-md shadow-slate-500/10">
+                    2
+                  </div>
+                  <div className="font-bold text-slate-200">최수아 @TheCompetitor</div>
+                  <div className="text-xs text-purple-400 mt-1">플래티넘 III</div>
+                  <div className="text-sm font-extrabold text-slate-300 mt-4">2,390 LP</div>
+                  <div className="text-[10px] text-slate-500 mt-1">누적 투표: 3,920회</div>
+                </div>
+
+                {/* 1st Place */}
+                <div className="bg-gradient-to-b from-purple-900/40 to-slate-950 p-8 rounded-3xl border-2 border-amber-500/80 text-center flex flex-col items-center justify-center relative md:order-2 h-76 shadow-xl shadow-amber-500/5">
+                  <div className="absolute -top-4 bg-amber-500 text-slate-950 px-4 py-1 rounded-full text-xs font-black uppercase tracking-widest shadow-md">
+                    CROWN WINNER
+                  </div>
+                  <div className="w-16 h-16 rounded-full bg-amber-500 flex items-center justify-center text-slate-950 border-2 border-amber-300 font-black text-2xl mb-4 shadow-lg shadow-amber-500/20">
+                    1
+                  </div>
+                  <div className="font-bold text-white text-lg">DJ_VibeMaker</div>
+                  <div className="text-xs text-amber-400 font-semibold mt-1">다이아몬드 V</div>
+                  <div className="text-xl font-black text-amber-300 mt-4">3,120 LP</div>
+                  <div className="text-xs text-slate-400 mt-1">누적 투표: 5,140회</div>
+                </div>
+
+                {/* 3rd Place */}
+                <div className="bg-gradient-to-b from-slate-900 to-slate-950 p-6 rounded-2xl border border-slate-800/80 text-center flex flex-col items-center justify-center relative md:order-3 h-60">
+                  <div className="w-10 h-10 rounded-full bg-amber-900/60 flex items-center justify-center text-amber-200 border-2 border-amber-800 font-extrabold text-md mb-3 shadow-md">
+                    3
+                  </div>
+                  <div className="font-bold text-slate-200">박지훈 @TheCreative</div>
+                  <div className="text-xs text-purple-400 mt-1">플래티넘 I</div>
+                  <div className="text-sm font-extrabold text-slate-300 mt-4">2,110 LP</div>
+                  <div className="text-[10px] text-slate-500 mt-1">누적 투표: 3,120회</div>
+                </div>
+
+              </div>
+
+              {/* Full Leaderboard Table */}
+              <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden mt-2">
+                <div className="p-4 bg-slate-950 text-xs font-bold text-slate-500 uppercase tracking-wider grid grid-cols-12 gap-2 border-b border-slate-850">
+                  <div className="col-span-2 text-center">순위</div>
+                  <div className="col-span-4 pl-4">크리에이터</div>
+                  <div className="col-span-3 text-center">현재 티어</div>
+                  <div className="col-span-3 text-right pr-4">음악 점수 (LP)</div>
+                </div>
+
+                <div className="divide-y divide-slate-850">
+                  {[
+                    { rank: 4, name: "NeonBreeze", tier: "플래티넘 I", lp: "1,980" },
+                    { rank: 5, name: "SunsetChill", tier: "골드 IV", lp: "1,850" },
+                    { rank: 6, name: "CyberGlow", tier: "골드 I", lp: "1,720" },
+                    { rank: 7, name: "RainyDay_Jazz", tier: "골드 II", lp: "1,450" }
+                  ].map((user) => (
+                    <div key={user.rank} className="p-4 grid grid-cols-12 gap-2 text-sm items-center hover:bg-slate-850/40 transition-all">
+                      <div className="col-span-2 text-center font-bold text-slate-400">{user.rank}</div>
+                      <div className="col-span-4 pl-4 font-semibold text-slate-200">{user.name}</div>
+                      <div className="col-span-3 text-center text-xs text-purple-400">{user.tier}</div>
+                      <div className="col-span-3 text-right pr-4 font-bold text-pink-400">{user.lp} LP</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+            </div>
+          )}
+
+          {/* TAB 4: PERSONAL GALLERY */}
+          {activeTab === 'gallery' && (
+            <div className="flex flex-col gap-6">
+              
+              <div className="flex flex-col gap-2">
+                <h2 className="text-xl font-bold flex items-center gap-2">
+                  <User className="w-6 h-6 text-teal-400" />
+                  나의 창작 아카이브 갤러리
+                </h2>
+                <p className="text-sm text-slate-400">
+                  지금까지 창작한 나만의 음반들과 대결 참여 이력입니다. 인스타 릴스나 숏츠용 음원으로 즉시 활용 가능합니다.
+                </p>
+              </div>
+
+              {/* Stats overview of user */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs text-slate-500">누적 발매 음반</span>
+                    <h3 className="text-2xl font-bold mt-1 text-teal-400">
+                      {myArchivedTracks.length}개
+                    </h3>
+                  </div>
+                  <Disc className="w-8 h-8 text-slate-700 animate-spin" style={{ animationDuration: '4s' }} />
+                </div>
+
+                <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs text-slate-500">획득한 최고 LP</span>
+                    <h3 className="text-2xl font-bold mt-1 text-purple-400">
+                      1,450 LP
+                    </h3>
+                  </div>
+                  <Award className="w-8 h-8 text-slate-700" />
+                </div>
+
+                <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs text-slate-500">누적 피드백 하트</span>
+                    <h3 className="text-2xl font-bold mt-1 text-pink-500">
+                      189개
+                    </h3>
+                  </div>
+                  <Heart className="w-8 h-8 text-slate-700" />
+                </div>
+              </div>
+
+              {/* Playlist Grid of archived works */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {myArchivedTracks.map((track) => (
+                  <div key={track.id} className="p-5 rounded-2xl bg-slate-900 border border-slate-800/80 hover:border-slate-700 transition-all flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-4">
+                      
+                      {/* Vinyl/Album Cover mockup */}
+                      <div className="w-16 h-16 rounded-xl bg-gradient-to-tr from-purple-800 to-indigo-900 border border-slate-700 flex items-center justify-center shadow-inner shrink-0 relative group">
+                        <Disc className="w-10 h-10 text-slate-400/80 group-hover:rotate-180 transition-all duration-1000" />
+                        <div className="w-3.5 h-3.5 rounded-full bg-slate-950 absolute"></div>
+                      </div>
+
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-purple-400">{track.theme}</span>
+                        <h3 className="text-sm font-bold text-slate-200 mt-0.5">{track.title}</h3>
+                        <p className="text-xs text-slate-500 line-clamp-1 mt-0.5">{track.prompt}</p>
+                        
+                        <div className="flex items-center gap-3 mt-2 text-[10px] text-slate-400">
+                          <span className="bg-slate-800 px-2 py-0.5 rounded text-slate-300">BPM: {track.bpm}</span>
+                          <span>•</span>
+                          <span>티어: {track.rank}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <button 
+                      onClick={() => playTrackData(track)}
+                      className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 text-teal-400 flex items-center justify-center transition-all"
+                    >
+                      <Play className="w-4 h-4 fill-current ml-0.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+            </div>
+          )}
+
+        </main>
+      </div>
+
+      {/* FOOTER */}
+      <footer className="bg-slate-950 border-t border-slate-900/60 py-6 text-center text-xs text-slate-600 mt-12">
+        <p>© 2026 MuBeat AI Inc. All Rights Reserved. 본 프로토타입은 UI/UX 및 오디오 기능 검증을 위해 설계되었습니다.</p>
+        <p className="mt-1 text-slate-700">Powered by Gemini 2.5 Flash API & Web Audio API Engine</p>
+      </footer>
+    </div>
+  );
+}
